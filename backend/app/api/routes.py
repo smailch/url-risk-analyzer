@@ -1,46 +1,70 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import AnalyzeRequest, AnalyzeResponse
 from app.services.analysis import analyze_heuristics
-from app.services.external_api import check_with_virustotal
-from app.services.external_api import check_with_virustotal, check_with_google_safe
-from app.logging.logger import logger   # <--- AJOUT du logger
-import traceback
-
+from app.services.external_api import check_with_otx, check_with_virustotal, check_with_google_safe
+from app.logging.logger import logger
+from app.utils.threat_assessment import is_otx_truly_malicious, is_vt_truly_malicious, vt_malicious_count
 router = APIRouter()
 
-@router.post("/analyze", response_model=AnalyzeResponse)
+@router.post("/analyze")
 async def analyze_endpoint(payload: AnalyzeRequest):
     url = str(payload.url)
-    logger.info(f"Analyse demandée pour: {url}")
+    heuristics = analyze_heuristics(url)
+    vt_result = await check_with_virustotal(url)
+    gsb_result = await check_with_google_safe(url)
+    result_otx = await check_with_otx(url)
+    external_checks = [vt_result, gsb_result, result_otx]
+    ERROR_DETAILS = ["api error", "api key missing"]
 
-    try:
-        heuristics = analyze_heuristics(url)
-        vt_result = await check_with_virustotal(url)
-        gsb_result = await check_with_google_safe(url)
-        external_checks = [vt_result, gsb_result]
-
-        suspicious = any(not h.matched for h in heuristics)
-        malicious = any(c.malicious for c in external_checks)
-        if malicious:
-            score = "malicious"
-        elif suspicious:
-            score = "suspect"
+    external_checks_valids = []
+    external_errors = []
+    for c in external_checks:
+        details = getattr(c, "details", "").lower()
+        if any(err in details for err in ERROR_DETAILS):
+            external_errors.append({
+                "source": getattr(c, "source", "unknown"),
+                "details": c.details
+            })
         else:
-            score = "safe"
+            # On affine ici avant d’insérer dans la liste
+            if getattr(c, "source", "") == "AlienVault OTX":
+                c.malicious = is_otx_truly_malicious(c)
+            elif getattr(c, "source", "") == "VirusTotal":
+                c.malicious = is_vt_truly_malicious(c)
+                # Expose aussi c.vt_flag_count: pour le detailed analysis
+                c.vt_flag_count = vt_malicious_count(getattr(c, "details", ""))
+            external_checks_valids.append(c)
 
-        final_decision = {
-            "level": score,
-            "reasons": [h.details for h in heuristics if not h.matched]
-        }
+    # Logique d’agrégation améliorée :
+    malicious = any(getattr(check, "malicious", False) for check in external_checks_valids)
+    vt_suspicious = next(
+        (check.vt_flag_count == 1 for check in external_checks_valids
+            if getattr(check, "source", "") == "VirusTotal"), False
+    )
+    suspicious = any(not h.matched for h in heuristics) or vt_suspicious
 
-        return AnalyzeResponse(
-            score=score,
-            heuristics=heuristics,
-            external_checks=external_checks,
-            final_decision=final_decision
-        )
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        logger.error(f"Erreur pendant analyse de {url}: {str(e)}\nTraceback:\n{tb}")
-        raise HTTPException(status_code=400, detail=f"Erreur d’analyse : {str(e)}\n{tb}")
+    if malicious:
+        score = "malicious"
+    elif suspicious or external_errors:
+        score = "suspect"
+    else:
+        score = "safe"
+
+    reasons = [h.details for h in heuristics if not h.matched]
+    if vt_suspicious:
+        reasons.append("VirusTotal : ce lien a été signalé par 1 moteur sur 70 (opinion minoritaire, suspicion)")
+    if external_errors:
+        reasons.append("Certaines sources n'ont pas répondu : " + ", ".join(e["source"] for e in external_errors))
+
+    final_decision = {
+        "level": score,
+        "reasons": reasons
+    }
+
+    return {
+        "score": score,
+        "heuristics": heuristics,
+        "external_checks": external_checks_valids,
+        "external_errors": external_errors,
+        "final_decision": final_decision
+    }

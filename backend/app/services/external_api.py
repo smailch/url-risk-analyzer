@@ -2,6 +2,8 @@ import os
 import httpx
 from app.models.schemas import ExternalCheck
 import base64
+from urllib.parse import urlparse
+
 VIRUSTOTAL_API_KEY = os.getenv("VT_API_KEY")
 GOOGLE_API_KEY = os.getenv("GSB_API_KEY")
 async def check_with_virustotal(url: str) -> ExternalCheck:
@@ -59,3 +61,40 @@ async def check_with_google_safe(url: str) -> ExternalCheck:
         found = "matches" in data and len(data["matches"]) > 0
         details = f"Matches: {len(data['matches'])}" if found else "Clean"
         return ExternalCheck(source="GoogleSafeBrowsing", malicious=found, details=details)
+
+
+
+
+
+ALIENVAULT_API_KEY = os.getenv("ALIENVAULT_API_KEY")
+
+async def check_with_otx(url: str) -> ExternalCheck:
+    if not ALIENVAULT_API_KEY:
+        return ExternalCheck(source="AlienVault OTX", malicious=False, details="API key missing")
+    # On extrait le domaine de l’URL (AlienVault OTX travaille domaine/IP, pas URL complète)
+    parsed = urlparse(url)
+    domain = parsed.hostname
+    if not domain:
+        return ExternalCheck(source="AlienVault OTX", malicious=False, details="Invalid URL")
+    api_url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/general"
+    headers = {"X-OTX-API-KEY": ALIENVAULT_API_KEY}
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(api_url, headers=headers)
+        if resp.status_code == 404:
+            return ExternalCheck(
+                source="AlienVault OTX", malicious=False, details="Domain not found in OTX (clean)"
+            )
+        if resp.status_code != 200:
+            return ExternalCheck(
+                source="AlienVault OTX", malicious=False, details=f"API error {resp.status_code}: {resp.text}"
+            )
+        data = resp.json()
+        pulses = data.get("pulse_info", {}).get("count", 0)
+        tags = data.get("pulse_info", {}).get("tags", [])
+        if pulses > 0:
+            details = f"Domain found in {pulses} OTX pulses. Tags: {', '.join(tags)}"
+            return ExternalCheck(source="AlienVault OTX", malicious=True, details=details)
+        else:
+            return ExternalCheck(
+                source="AlienVault OTX", malicious=False, details="Domain not associated with any threats in OTX"
+            )
