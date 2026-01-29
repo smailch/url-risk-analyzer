@@ -176,12 +176,3 @@ npm run dev
 
 ## ⭐️ Merci pour la visite !
 
-<p align="center">
-    <img src="https://camo.githubusercontent.com/64b973cb57806dd2b625e57e40571ce9ca4b4086d5c1ca932910cdaed296020a/68747470733a2f2f6d656469612e67697068792e636f6d2f6d656469612f7a356943766f316f4362717437756b4d51732f67697068792e676966" alt="fun gif" width="300"/>
-</p>
-
----
-
-## © Licence
-
-Ce projet est distribué sous licence MIT (voir LICENSE).
